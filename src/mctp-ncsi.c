@@ -128,20 +128,21 @@ static int mctp_init(struct ctx *ctx)
 static int mctp_tx(struct ctx *ctx, uint8_t type, struct iovec *iov,
 		   unsigned int n_iov)
 {
+	struct mctp_ioc_tag_ctl ctl = {
+		.peer_addr = ctx->eid,
+	};
 	struct sockaddr_mctp addr = {
 		.smctp_family = AF_MCTP,
 		.smctp_network = ctx->net,
 		.smctp_addr.s_addr = ctx->eid,
 		.smctp_type = type,
-		/* we will always be sending TO=1 messages; responses
-		 * from the devices are the only case where TO=0 */
-		.smctp_tag = MCTP_TAG_OWNER,
 	};
 	struct msghdr msg = { 0 };
 	size_t exp_len = 0;
 	unsigned int i;
 	ssize_t tx_len;
-	int fd;
+	uint8_t tag;
+	int rc, fd;
 
 	for (i = 0; i < n_iov; i++) {
 		exp_len += iov[i].iov_len;
@@ -155,15 +156,33 @@ static int mctp_tx(struct ctx *ctx, uint8_t type, struct iovec *iov,
 	fd = type == MCTP_TYPE_NC_SI ?
 		ctx->mctp_fd_ncsi : ctx->mctp_fd_ethernet;
 
+	/* we will always be sending TO=1 messages; responses
+	 * from the devices are the only case where TO=0 */
+	tag = MCTP_TAG_OWNER;
+
+	if (type == MCTP_TYPE_ETHERNET) {
+		rc = ioctl(fd, SIOCMCTPALLOCTAG, &ctl);
+		if (!rc)
+			tag = ctl.tag;
+	}
+
+	addr.smctp_tag = tag;
+
 	tx_len = sendmsg(fd, &msg, 0);
 	if (tx_len < 0) {
 		warn("MCTP send failed");
-		return -1;
+		rc = -1;
 	} else if ((size_t)tx_len != exp_len) {
 		warnx("MCTP send truncated");
+		rc = 0;
+	} else {
+		rc = 0;
 	}
 
-	return 0;
+	if (tag & MCTP_TAG_PREALLOC)
+		ioctl(fd, SIOCMCTPDROPTAG, &ctl);
+
+	return rc;
 }
 
 static int tap_rx(struct ctx *ctx)
