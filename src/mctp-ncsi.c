@@ -416,7 +416,7 @@ int main(int argc, char **argv)
 	for (;;) {
 		int c;
 
-		c = getopt_long(argc, argv, "hun:", opts, NULL);
+		c = getopt_long(argc, argv, "ehun:", opts, NULL);
 		if (c == -1)
 			break;
 
