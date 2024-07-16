@@ -23,6 +23,7 @@
 #include <linux/mctp.h>
 #include <linux/if.h>
 #include <linux/if_tun.h>
+#include <linux/rtnetlink.h>
 
 #include <netinet/ether.h>
 
@@ -42,7 +43,40 @@ struct ctx {
 	unsigned char buf[4096];
 };
 
-static int tap_init(struct ctx *ctx, const char *req_devname)
+static int tap_link_up(struct ctx *ctx)
+{
+	struct ifreq ifr = { 0 };
+	int fd, rc;
+
+	memcpy(&ifr.ifr_name, ctx->devname, sizeof(ifr.ifr_name));
+
+	/* the SIOCSIFFLAGS / SIOCGIFFLAGS ioctls aren't directly available on
+	 * the tun file/socket; we have the interface name, so can issue a call
+	 * to SIOCSIFFLAGS on a separate socket, specifying the name of our
+	 * tun device as the identifier */
+	fd = socket(AF_PACKET, SOCK_RAW, 0);
+	if (fd < 0) {
+		warn("socket(AF_PACKET)");
+		return -1;
+	}
+
+	rc = ioctl(fd, SIOCGIFFLAGS, &ifr);
+	if (rc) {
+		warn("ioctl(SIOCGIFFLAGS)");
+		goto out_close;
+	}
+
+	ifr.ifr_flags |= IFF_UP;
+	rc = ioctl(fd, SIOCSIFFLAGS, &ifr);
+	if (rc)
+		warn("ioctl(SIOCSIFFLAGS)");
+
+out_close:
+	close(fd);
+	return rc;
+}
+
+static int tap_init(struct ctx *ctx, const char *req_devname, bool up)
 {
 	struct ifreq ifr;
 	int fd, rc;
@@ -73,6 +107,15 @@ static int tap_init(struct ctx *ctx, const char *req_devname)
 	ctx->tap_fd = fd;
 	strcpy(ctx->devname, ifr.ifr_name);
 
+	if (!up)
+		return 0;
+
+	rc = tap_link_up(ctx);
+	if (rc) {
+		warnx("can't bring tap interface up");
+		return -1;
+	}
+
 	return 0;
 }
 
@@ -88,6 +131,7 @@ static int mctp_init(struct ctx *ctx)
 	fd = socket(AF_MCTP, SOCK_DGRAM, 0);
 	if (fd < 0) {
 		warn("Failure creating MCTP socket");
+		return 0;
 		return -1;
 	}
 
@@ -310,6 +354,7 @@ static int mctp_rx(struct ctx *ctx, uint8_t type)
 static const struct option opts[] = {
 	{ .name = "name", .has_arg = required_argument, .val = 'n' },
 	{ .name = "ethernet", .has_arg = no_argument, .val = 'e'},
+	{ .name = "up", .has_arg = no_argument, .val = 'u'},
 	{ .name = "help", .has_arg = no_argument, .val = 'h' },
 	{ 0 }
 };
@@ -357,7 +402,7 @@ static int parse_mctp_addr(const char *str, unsigned int *netp, uint8_t *eidp)
 static void usage(const char *progname)
 {
 	fprintf(stderr,
-		"usage: %s [--ethernet] [--name <IFNAME>] [NET,]<EID>\n",
+		"usage: %s [--ethernet] [--name <IFNAME>] [--up] [NET,]<EID>\n",
 		progname);
 }
 
@@ -365,12 +410,13 @@ int main(int argc, char **argv)
 {
 	const char *req_devname = NULL;
 	struct ctx _ctx, *ctx = &_ctx;
+	bool up = false;
 	int rc;
 
 	for (;;) {
 		int c;
 
-		c = getopt_long(argc, argv, "hn:", opts, NULL);
+		c = getopt_long(argc, argv, "hun:", opts, NULL);
 		if (c == -1)
 			break;
 
@@ -380,6 +426,9 @@ int main(int argc, char **argv)
 			return EXIT_SUCCESS;
 		case 'n':
 			req_devname = optarg;
+			break;
+		case 'u':
+			up = true;
 			break;
 		case 'e':
 			ctx->allow_ethernet = true;
@@ -400,7 +449,7 @@ int main(int argc, char **argv)
 	if (rc)
 		errx(EXIT_FAILURE, "can't parse MCTP address");
 
-	rc = tap_init(ctx, req_devname);
+	rc = tap_init(ctx, req_devname, up);
 	if (rc)
 		errx(EXIT_FAILURE, "can't create interface");
 
